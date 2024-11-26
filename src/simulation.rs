@@ -68,10 +68,10 @@ impl Entity {
         draw_line(
             self.pos.x,
             self.pos.y,
-            self.pos.x + 5.0 * self.direction.cos(),
-            self.pos.y + 5.0 * self.direction.sin(),
-            4.0,
-            BLACK,
+            self.pos.x + 8.0 * self.direction.cos(),
+            self.pos.y + 8.0 * self.direction.sin(),
+            2.0,
+            WHITE,
         );
     }
 
