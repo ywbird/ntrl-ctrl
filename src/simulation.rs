@@ -5,15 +5,19 @@ use ::rand::{
     Rng,
 };
 
-use macroquad::{
-    input,
-    prelude::*,
-    ui::{hash, root_ui, widgets},
-};
-
-use ultraviolet;
+use macroquad::prelude::*;
 
 use crate::{HEIGHT, WIDTH};
+
+const ENTITY_DETECT_RANGE: f32 = 100.0;
+const ENTITY_SIZE: f32 = 5.0;
+const FOOD_SIZE: f32 = 3.0;
+
+trait QuadTreeItem: Clone {
+    fn pos(&self) -> Vec2;
+    fn draw(&self);
+    fn debug(&self);
+}
 
 #[derive(Debug, Clone)]
 pub struct Entity {
@@ -21,7 +25,7 @@ pub struct Entity {
     coop: f32,
     share: f32,
     direction: f32,
-    is_eaten: bool,
+    food_collected: u32,
     group: EntityType,
 }
 
@@ -43,67 +47,226 @@ impl Distribution<EntityType> for Standard {
     }
 }
 
-impl Entity {
-    pub fn new(x: f32, y: f32) -> Self {
-        Entity {
-            pos: Vec2 { x, y },
-            coop: rand::gen_range(0.0, 1.0),
-            share: rand::gen_range(0.0, 1.0),
-            group: ::rand::random(),
-            direction: rand::gen_range(-PI, PI),
-            is_eaten: false,
-        }
+impl QuadTreeItem for Entity {
+    fn pos(&self) -> Vec2 {
+        self.pos
     }
-
     fn draw(&self) {
         draw_circle(
             self.pos.x,
             self.pos.y,
-            5.0,
+            ENTITY_SIZE,
             match &self.group {
                 EntityType::Predator => RED,
                 EntityType::Prey => BLUE,
             },
         );
+
         draw_line(
             self.pos.x,
             self.pos.y,
-            self.pos.x + 8.0 * self.direction.cos(),
-            self.pos.y + 8.0 * self.direction.sin(),
+            self.pos.x + ENTITY_SIZE * 1.5 * self.direction.cos(),
+            self.pos.y + ENTITY_SIZE * 1.5 * self.direction.sin(),
             2.0,
             WHITE,
         );
     }
 
-    fn step(&mut self, world: &QuadTree) {
+    fn debug(&self) {
+        draw_circle_lines(self.pos.x, self.pos.y, ENTITY_DETECT_RANGE, 2.0, WHITE);
+
+        draw_rectangle_lines(
+            self.pos.x - ENTITY_DETECT_RANGE,
+            self.pos.y - ENTITY_DETECT_RANGE,
+            2.0 * ENTITY_DETECT_RANGE,
+            2.0 * ENTITY_DETECT_RANGE,
+            2.0,
+            WHITE,
+        );
+    }
+}
+
+impl Entity {
+    pub fn new(x: f32, y: f32, group: EntityType) -> Self {
+        Entity {
+            pos: Vec2 { x, y },
+            coop: rand::gen_range(0.0, 1.0),
+            share: rand::gen_range(0.0, 1.0),
+            group,
+            direction: rand::gen_range(-PI, PI),
+            food_collected: 0,
+        }
+    }
+
+    fn step(&mut self, entities_qt: &QuadTree<Entity>, foods_qt: &QuadTree<Food>) {
+        let Vec2 { x, y } = self.pos;
+
+        let close_entities: Vec<Entity> = entities_qt
+            .query(Rect {
+                x: x - ENTITY_DETECT_RANGE,
+                y: y - ENTITY_DETECT_RANGE,
+                w: 2.0 * ENTITY_DETECT_RANGE,
+                h: 2.0 * ENTITY_DETECT_RANGE,
+            })
+            .into_iter()
+            .filter(|e| {
+                self.pos.distance_squared(e.pos) <= ENTITY_DETECT_RANGE * ENTITY_DETECT_RANGE
+            })
+            .collect();
+
         match &self.group {
-            EntityType::Prey => {}
+            EntityType::Prey => {
+                let mut close_foods: Vec<Food> = foods_qt
+                    .query(Rect::new(
+                        x - ENTITY_DETECT_RANGE,
+                        y - ENTITY_DETECT_RANGE,
+                        2.0 * ENTITY_DETECT_RANGE,
+                        2.0 * ENTITY_DETECT_RANGE,
+                    ))
+                    .into_iter()
+                    .filter(|e| {
+                        self.pos.distance_squared(e.pos)
+                            <= ENTITY_DETECT_RANGE * ENTITY_DETECT_RANGE
+                    })
+                    .collect();
+
+                close_foods.sort_by(|a, b| {
+                    self.pos
+                        .distance(a.pos)
+                        .partial_cmp(&self.pos.distance(b.pos))
+                        .unwrap()
+                });
+
+                // println!("{:?}", &close_foods);
+
+                if close_foods.len() > 0 {
+                    for food in close_foods[0..=(2.min(close_foods.len() - 1))].iter() {
+                        let Vec2 {
+                            x: food_x,
+                            y: food_y,
+                        } = food.pos();
+
+                        draw_line(
+                            self.pos.x,
+                            self.pos.y,
+                            food_x,
+                            food_y,
+                            2.0,
+                            Color::new(
+                                1.0 / (if self.food_collected != 0 {
+                                    self.food_collected as f32
+                                } else {
+                                    1.0
+                                }),
+                                1.0 / (if self.food_collected != 0 {
+                                    self.food_collected as f32
+                                } else {
+                                    1.0
+                                }),
+                                1.0 / (if self.food_collected != 0 {
+                                    self.food_collected as f32
+                                } else {
+                                    1.0
+                                }),
+                                1.0,
+                            ),
+                        );
+
+                        let dir =
+                            (food.pos.y - self.pos.y).atan2(close_foods[0].pos.x - self.pos.x);
+                        self.direction += steer(self.direction, dir)
+                            / self.pos.distance(food.pos)
+                            / (if self.food_collected != 0 {
+                                self.food_collected as f32
+                            } else {
+                                1.0
+                            })
+                            .powf(1.5);
+                    }
+                }
+            }
             EntityType::Predator => {}
         }
 
         self.pos.x += 1.0 * self.direction.cos();
         self.pos.y += 1.0 * self.direction.sin();
 
-        self.pos.x = self.pos.x.rem_euclid(world.boundary.w);
-        self.pos.y = self.pos.y.rem_euclid(world.boundary.h);
+        self.pos.x = self.pos.x.rem_euclid(entities_qt.boundary.w);
+        self.pos.y = self.pos.y.rem_euclid(entities_qt.boundary.h);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Food {
+    pos: Vec2,
+    is_eaten: bool,
+}
+
+impl QuadTreeItem for Food {
+    fn pos(&self) -> Vec2 {
+        self.pos
+    }
+    fn draw(&self) {
+        draw_circle(self.pos.x, self.pos.y, FOOD_SIZE, ORANGE);
+    }
+    fn debug(&self) {}
+}
+
+impl Food {
+    pub fn new(x: f32, y: f32) -> Self {
+        Food {
+            pos: Vec2 { x, y },
+            is_eaten: false,
+        }
+    }
+
+    fn step(&mut self, entity_qt: &QuadTree<Entity>) {
+        let Vec2 { x, y } = self.pos;
+
+        let mut close_entities: Vec<Entity> = entity_qt
+            .query(Rect::new(
+                x - ENTITY_DETECT_RANGE,
+                y - ENTITY_DETECT_RANGE,
+                2.0 * ENTITY_DETECT_RANGE,
+                2.0 * ENTITY_DETECT_RANGE,
+            ))
+            .into_iter()
+            .filter(|e| {
+                self.pos.distance_squared(e.pos) <= ENTITY_DETECT_RANGE * ENTITY_DETECT_RANGE
+            })
+            .collect();
+
+        close_entities.sort_by(|a, b| {
+            self.pos
+                .distance(a.pos)
+                .partial_cmp(&self.pos.distance(b.pos))
+                .unwrap()
+        });
+
+        if close_entities.len() > 0 {
+            if self.pos.distance_squared(close_entities[0].pos) <= (ENTITY_SIZE + FOOD_SIZE).powi(2)
+            {
+                self.is_eaten = true;
+            }
+        }
     }
 }
 
 #[derive(Debug, Clone)]
-struct QuadTreeChildren {
+struct QuadTreeChildren<T: QuadTreeItem> {
     /* (x,y)----+----+
            + nw + ne +
            +----+----+
            + sw + se +
            +----+----(x+w,y+h)
     */
-    nw: QuadTree,
-    ne: QuadTree,
-    sw: QuadTree,
-    se: QuadTree,
+    nw: QuadTree<T>,
+    ne: QuadTree<T>,
+    sw: QuadTree<T>,
+    se: QuadTree<T>,
 }
 
-impl QuadTreeChildren {
+impl<T: QuadTreeItem> QuadTreeChildren<T> {
     pub fn new(boundary: Rect, capacity: usize) -> Self {
         let Rect { x, y, w, h } = boundary;
 
@@ -149,39 +312,39 @@ impl QuadTreeChildren {
 }
 
 #[derive(Debug, Clone)]
-pub struct QuadTree {
+pub struct QuadTree<T: QuadTreeItem> {
     boundary: Rect,
     capacity: usize,
-    entities: Vec<Entity>,
-    children: Option<Box<QuadTreeChildren>>,
+    items: Vec<T>,
+    children: Option<Box<QuadTreeChildren<T>>>,
     divided: bool,
 }
 
-impl QuadTree {
+impl<T: QuadTreeItem> QuadTree<T> {
     pub fn new(boundary: Rect, capacity: usize) -> Self {
         QuadTree {
             boundary,
             capacity,
-            entities: vec![],
+            items: vec![],
             children: None,
             divided: false,
         }
     }
 
-    pub fn insert(&mut self, entity: Entity) {
-        if self.boundary.contains(entity.pos) {
-            if (self.capacity >= self.entities.len()) && (!self.divided) {
-                self.entities.push(entity);
+    pub fn insert(&mut self, item: T) {
+        if self.boundary.contains(item.pos()) {
+            if (self.capacity >= self.items.len()) && (!self.divided) {
+                self.items.push(item);
             } else {
                 if !self.divided {
                     self.subdivide();
                 }
 
                 if let Some(children) = self.children.as_mut() {
-                    children.ne.insert(entity.clone());
-                    children.nw.insert(entity.clone());
-                    children.se.insert(entity.clone());
-                    children.sw.insert(entity.clone());
+                    children.ne.insert(item.clone());
+                    children.nw.insert(item.clone());
+                    children.se.insert(item.clone());
+                    children.sw.insert(item.clone());
                 }
             }
         }
@@ -192,7 +355,7 @@ impl QuadTree {
             self.boundary,
             self.capacity,
         )));
-        for entity in self.entities.iter() {
+        for entity in self.items.iter() {
             if let Some(children) = self.children.as_mut() {
                 children.ne.insert(entity.clone());
                 children.nw.insert(entity.clone());
@@ -200,13 +363,12 @@ impl QuadTree {
                 children.sw.insert(entity.clone());
             }
         }
-        self.entities.clear();
+        self.items.clear();
         self.divided = true;
     }
 
-    // TODO: 실제 엔티티 수와 맞지 않는 문제 발생
-    pub fn query(&self, range: Rect) -> Vec<&Entity> {
-        let mut found: Vec<&Entity> = Vec::new();
+    pub fn query(&self, range: Rect) -> Vec<T> {
+        let mut found: Vec<T> = Vec::new();
         if self.boundary.intersect(range).is_some() {
             if let Some(children) = self.children.as_ref() {
                 let mut ne_result = children.ne.query(range);
@@ -219,9 +381,9 @@ impl QuadTree {
                 found.append(&mut se_result);
                 found.append(&mut sw_result);
             } else {
-                for entity in self.entities.iter() {
-                    if range.contains(entity.pos) {
-                        found.push(entity);
+                for entity in self.items.iter() {
+                    if range.contains(entity.pos()) {
+                        found.push(entity.clone());
                     }
                 }
             }
@@ -247,10 +409,13 @@ impl QuadTree {
             children.se.show();
             children.sw.show();
         }
+        for item in self.items.iter() {
+            item.debug();
+        }
     }
 
     fn draw(&self) {
-        for entity in self.entities.iter() {
+        for entity in self.items.iter() {
             entity.draw();
         }
         if let Some(children) = self.children.as_ref() {
@@ -264,8 +429,10 @@ impl QuadTree {
 
 pub struct Simulation {
     pub is_running: bool,
-    pub quadtree: QuadTree,
+    pub entity_qt: QuadTree<Entity>,
     pub entities: Vec<Entity>,
+    pub food_qt: QuadTree<Food>,
+    pub foods: Vec<Food>,
     boundary: Rect,
     capacity: usize,
     debug: bool,
@@ -275,9 +442,19 @@ pub struct Simulation {
 impl Simulation {
     pub fn new(w: f32, h: f32) -> Self {
         Simulation {
-            entities: vec![],
             is_running: false,
-            quadtree: QuadTree::new(
+            entities: vec![],
+            entity_qt: QuadTree::new(
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w,
+                    h,
+                },
+                4,
+            ),
+            foods: vec![],
+            food_qt: QuadTree::new(
                 Rect {
                     x: 0.0,
                     y: 0.0,
@@ -317,7 +494,7 @@ impl Simulation {
             h: 98.0,
         };
         let Rect { x, y, w, h } = range;
-        let result = self.quadtree.query(range).len();
+        let result = self.entity_qt.query(range).len();
         draw_rectangle_lines(x, y, w, h, 2.0, RED);
         draw_text(
             format!("{}, {}, {:?}", self.entities.len(), result, self.pause).as_str(),
@@ -329,24 +506,48 @@ impl Simulation {
     }
 
     fn update(&mut self) {
-        if is_mouse_button_down(MouseButton::Left) {
+        if is_mouse_button_pressed(MouseButton::Left) {
             let (x, y) = mouse_position();
-            let rand_len = rand::gen_range(-30.0, 30.0);
+            let rand_len = ((rand::gen_range(0.0, 1.0) as f64).sqrt() as f32) * 20.0;
             let rand_dir = rand::gen_range(-PI, PI);
             self.entities.push(Entity::new(
                 x + rand_len * rand_dir.cos(),
                 y + rand_len * rand_dir.sin(),
+                EntityType::Prey,
             ));
         }
-        if is_mouse_button_down(MouseButton::Right) {
+        if is_mouse_button_pressed(MouseButton::Right) {
             let (x, y) = mouse_position();
-            self.entities.push(Entity::new(x, y));
+            let rand_len = ((rand::gen_range(0.0, 1.0) as f64).sqrt() as f32) * 20.0;
+            let rand_dir = rand::gen_range(-PI, PI);
+            self.entities.push(Entity::new(
+                x + rand_len * rand_dir.cos(),
+                y + rand_len * rand_dir.sin(),
+                EntityType::Predator,
+            ));
+        }
+        if is_mouse_button_down(MouseButton::Middle) {
+            let (x, y) = mouse_position();
+            let rand_len = ((rand::gen_range(0.0, 1.0) as f64).sqrt() as f32) * 20.0;
+            let rand_dir = rand::gen_range(-PI, PI);
+            self.foods.push(Food::new(
+                x + rand_len * rand_dir.cos(),
+                y + rand_len * rand_dir.sin(),
+            ));
         }
 
-        if is_key_down(KeyCode::R) {
+        if is_key_pressed(KeyCode::R) {
             self.entities.clear();
+            self.foods.clear();
             for _ in 0..100 {
                 self.entities.push(Entity::new(
+                    rand::gen_range(0.0, WIDTH as f32),
+                    rand::gen_range(0.0, HEIGHT as f32),
+                    EntityType::Prey,
+                ));
+            }
+            for _ in 0..100 {
+                self.foods.push(Food::new(
                     rand::gen_range(0.0, WIDTH as f32),
                     rand::gen_range(0.0, HEIGHT as f32),
                 ));
@@ -365,10 +566,18 @@ impl Simulation {
         if self.pause {
             return ();
         }
-        self.quadtree = QuadTree::new(self.boundary.clone(), self.capacity);
+        self.entity_qt = QuadTree::new(self.boundary.clone(), self.capacity);
         for entity in self.entities.iter_mut() {
-            self.quadtree.insert(entity.clone());
-            entity.step(&self.quadtree);
+            entity.step(&self.entity_qt, &self.food_qt);
+            self.entity_qt.insert(entity.clone());
+        }
+        self.food_qt = QuadTree::new(self.boundary.clone(), self.capacity);
+        for food in self.foods.iter_mut() {
+            food.step(&self.entity_qt);
+            if !food.is_eaten {
+                self.food_qt.insert(food.clone());
+            }
+            // food.step(&self.food_qt);
         }
     }
 
@@ -376,9 +585,19 @@ impl Simulation {
         self.clear();
         self.update();
         self.draw();
-        self.quadtree.draw();
+        self.entity_qt.draw();
+        self.food_qt.draw();
         if self.debug {
-            self.quadtree.show();
+            self.entity_qt.show();
+            self.food_qt.show();
         }
+    }
+}
+
+fn steer(dir0: f32, dir: f32) -> f32 {
+    if (dir - dir0).rem_euclid(2.0 * PI) < PI {
+        1.0
+    } else {
+        -1.0
     }
 }
