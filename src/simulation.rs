@@ -73,16 +73,16 @@ impl QuadTreeItem for Entity {
     }
 
     fn debug(&self) {
-        draw_circle_lines(self.pos.x, self.pos.y, ENTITY_DETECT_RANGE, 2.0, WHITE);
+        // draw_circle_lines(self.pos.x, self.pos.y, ENTITY_DETECT_RANGE, 2.0, WHITE);
 
-        draw_rectangle_lines(
-            self.pos.x - ENTITY_DETECT_RANGE,
-            self.pos.y - ENTITY_DETECT_RANGE,
-            2.0 * ENTITY_DETECT_RANGE,
-            2.0 * ENTITY_DETECT_RANGE,
-            2.0,
-            WHITE,
-        );
+        // draw_rectangle_lines(
+        //     self.pos.x - ENTITY_DETECT_RANGE,
+        //     self.pos.y - ENTITY_DETECT_RANGE,
+        //     2.0 * ENTITY_DETECT_RANGE,
+        //     2.0 * ENTITY_DETECT_RANGE,
+        //     2.0,
+        //     WHITE,
+        // );
     }
 }
 
@@ -185,7 +185,72 @@ impl Entity {
                     }
                 }
             }
-            EntityType::Predator => {}
+            EntityType::Predator => {
+                let mut close_preies: Vec<Entity> = close_entities
+                    .into_iter()
+                    .filter(|e| {
+                        (self.pos.distance_squared(e.pos)
+                            <= ENTITY_DETECT_RANGE * ENTITY_DETECT_RANGE)
+                            && match e.group {
+                                EntityType::Prey => true,
+                                EntityType::Predator => false,
+                            }
+                    })
+                    .collect();
+
+                close_preies.sort_by(|a, b| {
+                    self.pos
+                        .distance(a.pos)
+                        .partial_cmp(&self.pos.distance(b.pos))
+                        .unwrap()
+                });
+
+                if close_preies.len() > 0 {
+                    for food in close_preies[0..=(2.min(close_preies.len() - 1))].iter() {
+                        let Vec2 {
+                            x: food_x,
+                            y: food_y,
+                        } = food.pos();
+
+                        draw_line(
+                            self.pos.x,
+                            self.pos.y,
+                            food_x,
+                            food_y,
+                            2.0,
+                            Color::new(
+                                1.0 / (if self.food_collected != 0 {
+                                    self.food_collected as f32
+                                } else {
+                                    1.0
+                                }),
+                                1.0 / (if self.food_collected != 0 {
+                                    self.food_collected as f32
+                                } else {
+                                    1.0
+                                }),
+                                1.0 / (if self.food_collected != 0 {
+                                    self.food_collected as f32
+                                } else {
+                                    1.0
+                                }),
+                                1.0,
+                            ),
+                        );
+
+                        let dir =
+                            (food.pos.y - self.pos.y).atan2(close_preies[0].pos.x - self.pos.x);
+                        self.direction += steer(self.direction, dir)
+                            / self.pos.distance(food.pos)
+                            / (if self.food_collected != 0 {
+                                self.food_collected as f32
+                            } else {
+                                1.0
+                            })
+                            .powf(1.5);
+                    }
+                }
+            }
         }
 
         self.pos.x += 1.0 * self.direction.cos();
@@ -506,7 +571,9 @@ impl Simulation {
     }
 
     fn update(&mut self) {
-        if is_mouse_button_pressed(MouseButton::Left) {
+        if is_mouse_button_pressed(MouseButton::Left)
+            || (is_mouse_button_down(MouseButton::Left) && is_key_down(KeyCode::LeftControl))
+        {
             let (x, y) = mouse_position();
             let rand_len = ((rand::gen_range(0.0, 1.0) as f64).sqrt() as f32) * 20.0;
             let rand_dir = rand::gen_range(-PI, PI);
@@ -516,7 +583,9 @@ impl Simulation {
                 EntityType::Prey,
             ));
         }
-        if is_mouse_button_pressed(MouseButton::Right) {
+        if is_mouse_button_pressed(MouseButton::Right)
+            || (is_mouse_button_down(MouseButton::Right) && is_key_down(KeyCode::LeftControl))
+        {
             let (x, y) = mouse_position();
             let rand_len = ((rand::gen_range(0.0, 1.0) as f64).sqrt() as f32) * 20.0;
             let rand_dir = rand::gen_range(-PI, PI);
@@ -563,17 +632,18 @@ impl Simulation {
             self.pause = !self.pause;
         }
 
-        if self.pause {
-            return ();
-        }
         self.entity_qt = QuadTree::new(self.boundary.clone(), self.capacity);
         for entity in self.entities.iter_mut() {
-            entity.step(&self.entity_qt, &self.food_qt);
+            if !self.pause {
+                entity.step(&self.entity_qt, &self.food_qt);
+            }
             self.entity_qt.insert(entity.clone());
         }
         self.food_qt = QuadTree::new(self.boundary.clone(), self.capacity);
         for food in self.foods.iter_mut() {
-            food.step(&self.entity_qt);
+            if !self.pause {
+                food.step(&self.entity_qt);
+            }
             if !food.is_eaten {
                 self.food_qt.insert(food.clone());
             }
