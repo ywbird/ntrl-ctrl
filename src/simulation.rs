@@ -27,6 +27,7 @@ pub struct Entity {
     direction: f32,
     food_collected: u32,
     group: EntityType,
+    is_eaten: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -95,13 +96,14 @@ impl Entity {
             group,
             direction: rand::gen_range(-PI, PI),
             food_collected: 0,
+            is_eaten: false,
         }
     }
 
-    fn step(&mut self, entities_qt: &QuadTree<Entity>, foods_qt: &QuadTree<Food>) {
+    fn step(&mut self, entity_qt: &QuadTree<Entity>, foods_qt: &QuadTree<Food>) {
         let Vec2 { x, y } = self.pos;
 
-        let close_entities: Vec<Entity> = entities_qt
+        let close_entities: Vec<Entity> = entity_qt
             .query(Rect {
                 x: x - ENTITY_DETECT_RANGE,
                 y: y - ENTITY_DETECT_RANGE,
@@ -124,10 +126,7 @@ impl Entity {
                         2.0 * ENTITY_DETECT_RANGE,
                     ))
                     .into_iter()
-                    .filter(|e| {
-                        self.pos.distance_squared(e.pos)
-                            <= ENTITY_DETECT_RANGE * ENTITY_DETECT_RANGE
-                    })
+                    .filter(|e| self.pos.distance_squared(e.pos) <= ENTITY_DETECT_RANGE.powi(2))
                     .collect();
 
                 close_foods.sort_by(|a, b| {
@@ -137,41 +136,8 @@ impl Entity {
                         .unwrap()
                 });
 
-                // println!("{:?}", &close_foods);
-
                 if close_foods.len() > 0 {
                     for food in close_foods[0..=(2.min(close_foods.len() - 1))].iter() {
-                        let Vec2 {
-                            x: food_x,
-                            y: food_y,
-                        } = food.pos();
-
-                        draw_line(
-                            self.pos.x,
-                            self.pos.y,
-                            food_x,
-                            food_y,
-                            2.0,
-                            Color::new(
-                                1.0 / (if self.food_collected != 0 {
-                                    self.food_collected as f32
-                                } else {
-                                    1.0
-                                }),
-                                1.0 / (if self.food_collected != 0 {
-                                    self.food_collected as f32
-                                } else {
-                                    1.0
-                                }),
-                                1.0 / (if self.food_collected != 0 {
-                                    self.food_collected as f32
-                                } else {
-                                    1.0
-                                }),
-                                1.0,
-                            ),
-                        );
-
                         let dir =
                             (food.pos.y - self.pos.y).atan2(close_foods[0].pos.x - self.pos.x);
                         self.direction += steer(self.direction, dir)
@@ -182,6 +148,29 @@ impl Entity {
                                 1.0
                             })
                             .powf(1.5);
+                    }
+                }
+
+                let mut close_predators: Vec<Entity> = close_entities
+                    .into_iter()
+                    .filter(|e| match e.group {
+                        EntityType::Prey => false,
+                        EntityType::Predator => true,
+                    })
+                    .collect();
+
+                close_predators.sort_by(|a, b| {
+                    self.pos
+                        .distance(a.pos)
+                        .partial_cmp(&self.pos.distance(b.pos))
+                        .unwrap()
+                });
+
+                if close_predators.len() > 0 {
+                    if self.pos.distance_squared(close_predators[0].pos)
+                        <= (ENTITY_SIZE * 2.0).powi(2)
+                    {
+                        self.is_eaten = true;
                     }
                 }
             }
@@ -212,32 +201,6 @@ impl Entity {
                             y: food_y,
                         } = food.pos();
 
-                        draw_line(
-                            self.pos.x,
-                            self.pos.y,
-                            food_x,
-                            food_y,
-                            2.0,
-                            Color::new(
-                                1.0 / (if self.food_collected != 0 {
-                                    self.food_collected as f32
-                                } else {
-                                    1.0
-                                }),
-                                1.0 / (if self.food_collected != 0 {
-                                    self.food_collected as f32
-                                } else {
-                                    1.0
-                                }),
-                                1.0 / (if self.food_collected != 0 {
-                                    self.food_collected as f32
-                                } else {
-                                    1.0
-                                }),
-                                1.0,
-                            ),
-                        );
-
                         let dir =
                             (food.pos.y - self.pos.y).atan2(close_preies[0].pos.x - self.pos.x);
                         self.direction += steer(self.direction, dir)
@@ -256,8 +219,8 @@ impl Entity {
         self.pos.x += 1.0 * self.direction.cos();
         self.pos.y += 1.0 * self.direction.sin();
 
-        self.pos.x = self.pos.x.rem_euclid(entities_qt.boundary.w);
-        self.pos.y = self.pos.y.rem_euclid(entities_qt.boundary.h);
+        self.pos.x = self.pos.x.rem_euclid(entity_qt.boundary.w);
+        self.pos.y = self.pos.y.rem_euclid(entity_qt.boundary.h);
     }
 }
 
@@ -298,6 +261,10 @@ impl Food {
             .into_iter()
             .filter(|e| {
                 self.pos.distance_squared(e.pos) <= ENTITY_DETECT_RANGE * ENTITY_DETECT_RANGE
+                    && match e.group {
+                        EntityType::Predator => false,
+                        EntityType::Prey => true,
+                    }
             })
             .collect();
 
@@ -608,14 +575,21 @@ impl Simulation {
         if is_key_pressed(KeyCode::R) {
             self.entities.clear();
             self.foods.clear();
-            for _ in 0..100 {
+            for _ in 0..500 {
                 self.entities.push(Entity::new(
                     rand::gen_range(0.0, WIDTH as f32),
                     rand::gen_range(0.0, HEIGHT as f32),
                     EntityType::Prey,
                 ));
             }
-            for _ in 0..100 {
+            for _ in 0..500 {
+                self.entities.push(Entity::new(
+                    rand::gen_range(0.0, WIDTH as f32),
+                    rand::gen_range(0.0, HEIGHT as f32),
+                    EntityType::Predator,
+                ));
+            }
+            for _ in 0..500 {
                 self.foods.push(Food::new(
                     rand::gen_range(0.0, WIDTH as f32),
                     rand::gen_range(0.0, HEIGHT as f32),
@@ -633,6 +607,12 @@ impl Simulation {
         }
 
         self.entity_qt = QuadTree::new(self.boundary.clone(), self.capacity);
+        self.entities = self
+            .entities
+            .clone()
+            .into_iter()
+            .filter(|a| !a.is_eaten)
+            .collect();
         for entity in self.entities.iter_mut() {
             if !self.pause {
                 entity.step(&self.entity_qt, &self.food_qt);
@@ -640,6 +620,12 @@ impl Simulation {
             self.entity_qt.insert(entity.clone());
         }
         self.food_qt = QuadTree::new(self.boundary.clone(), self.capacity);
+        self.foods = self
+            .foods
+            .clone()
+            .into_iter()
+            .filter(|a| !a.is_eaten)
+            .collect();
         for food in self.foods.iter_mut() {
             if !self.pause {
                 food.step(&self.entity_qt);
